@@ -161,6 +161,10 @@ examined backward from the address.
 - `list function` : 查看指定函数的代码
 - `list main.cpp:15` ： 查看指定文件,指定行
 
+
+- `layout asm` 显示汇编
+- `layout src` 显示源码
+
 ## 8. 调用栈
 
 - `backtrace/bt` ， 查看栈回溯信息
