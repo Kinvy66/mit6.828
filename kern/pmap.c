@@ -10,8 +10,8 @@
 #include <kern/kclock.h>
 
 // These variables are set by i386_detect_memory()
-size_t npages;			// Amount of physical memory (in pages)
-static size_t npages_basemem;	// Amount of base memory (in pages)
+size_t npages;			// Amount of physical memory (in pages) 物理内存总页数
+static size_t npages_basemem;	// Amount of base memory (in pages)， 基地址所在的页
 
 // These variables are set in mem_init()
 pde_t *kern_pgdir;		// Kernel's initial page directory
@@ -36,7 +36,7 @@ i386_detect_memory(void)
 
 	// Use CMOS calls to measure available base & extended memory.
 	// (CMOS calls return results in kilobytes.)
-	basemem = nvram_read(NVRAM_BASELO);
+	basemem = nvram_read(NVRAM_BASELO);  // 640KB
 	extmem = nvram_read(NVRAM_EXTLO);
 	ext16mem = nvram_read(NVRAM_EXT16LO) * 64;
 
@@ -50,7 +50,7 @@ i386_detect_memory(void)
 		totalmem = basemem;
 
 	npages = totalmem / (PGSIZE / 1024);
-	npages_basemem = basemem / (PGSIZE / 1024);
+	npages_basemem = basemem / (PGSIZE / 1024);  // 640K/4K
 
 	cprintf("Physical memory: %uK available, base = %uK, extended = %uK\n",
 		totalmem, basemem, totalmem - basemem);
@@ -102,8 +102,13 @@ boot_alloc(uint32_t n)
 	// to a multiple of PGSIZE.
 	//
 	// LAB 2: Your code here.
+	result = nextfree;
+	nextfree = ROUNDUP(nextfree + n, PGSIZE);
+	if ((uint32_t)nextfree-KERNBASE > (npages*PGSIZE)) {
+		panic("OUT OF MEMORY");
+	}
 
-	return NULL;
+	return result;
 }
 
 // Set up a two-level page table:
@@ -125,7 +130,7 @@ mem_init(void)
 	i386_detect_memory();
 
 	// Remove this line when you're ready to test this function.
-	panic("mem_init: This function is not finished\n");
+	// panic("mem_init: This function is not finished\n");
 
 	//////////////////////////////////////////////////////////////////////
 	// create initial page directory.
@@ -148,6 +153,9 @@ mem_init(void)
 	// array.  'npages' is the number of physical pages in memory.  Use memset
 	// to initialize all fields of each struct PageInfo to 0.
 	// Your code goes here:
+	// 分配用于存放页表信息的物理空间
+	pages = (struct PageInfo*)boot_alloc(npages * sizeof(struct PageInfo));
+	memset(pages, 0, npages * sizeof(struct PageInfo));  // 清空分配的空间
 
 
 	//////////////////////////////////////////////////////////////////////
@@ -156,6 +164,8 @@ mem_init(void)
 	// memory management will go through the page_* functions. In
 	// particular, we can now map memory using boot_map_region
 	// or page_insert
+	// page_init() 主要是将128MB的物理空间中空闲的部分以
+	// 链表的形式存储起来并进行分配和回收
 	page_init();
 
 	check_page_free_list(1);
@@ -252,7 +262,33 @@ page_init(void)
 	// NB: DO NOT actually touch the physical memory corresponding to
 	// free pages!
 	size_t i;
-	for (i = 0; i < npages; i++) {
+
+	// boot_alloc(0) 获取之前分配到空闲页的首地址, 
+	// npages_basemem = 640K / 4k
+	// (1MB - 640KB)/4KB = 96
+	const size_t page_in_use_end = 
+			npages_basemem + 96 + ((uint32_t)boot_alloc(0) - KERNBASE) / PGSIZE;
+
+	// page_in_use_end = 600
+	cprintf("now in used: %d\n", page_in_use_end);
+
+	// 设置page0为使用
+	cprintf("%08x %08x\n", pages, (uint32_t)boot_alloc(0));
+
+	// page0 存放IDT，
+	pages[0].pp_ref = 1;
+
+	for (i = 1; i < npages_basemem; i++) {
+		pages[i].pp_ref = 0;
+		pages[i].pp_link = page_free_list;
+		page_free_list = &pages[i];
+	}
+	// I/O
+	for(i = npages_basemem; i < page_in_use_end; ++i) {
+		pages[i].pp_ref = 1;
+	}
+
+	for (i = page_in_use_end; i < npages; i++) {
 		pages[i].pp_ref = 0;
 		pages[i].pp_link = page_free_list;
 		page_free_list = &pages[i];
@@ -275,7 +311,18 @@ struct PageInfo *
 page_alloc(int alloc_flags)
 {
 	// Fill this function in
-	return 0;
+	struct PageInfo* temp;
+	if (page_free_list == NULL) {
+		return NULL;
+	}
+	temp = page_free_list;
+	page_free_list = temp->pp_link;
+	temp->pp_link = NULL;
+	if (alloc_flags & ALLOC_ZERO) {
+		//因为所有的程序中的地址都是虚拟地址进行操作的，所以我们需要将真实的物理页面转换到虚拟地址下初始化
+		memset(page2kva(temp), 0, PGSIZE);
+	}
+	return temp;
 }
 
 //

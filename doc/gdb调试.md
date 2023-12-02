@@ -156,7 +156,7 @@ examined backward from the address.
 
 ## 7. 源代码查看/管理
 
-- `list` -> `l` 显示源码，默认10行
+- `list` -> `l` 显示源码，默认1730行
 - `set listsize xx` : 设置显示的行数
 - `list function` : 查看指定函数的代码
 - `list main.cpp:15` ： 查看指定文件,指定行
