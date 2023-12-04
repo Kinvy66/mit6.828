@@ -737,8 +737,12 @@ mov    %esp,%ebp
 
 ![](./images/stack-frame.png)
 
+在栈帧的内存示意图中可以看到，帧指针(ebp) 类似于链表数据结构中的头节点，它保存的使上一个调用栈的指针，依次类推，就能回溯函数调用关系。
+
+
 **Exercise 10:**
 > 熟悉C语言的调用规则，在 `obj/kern/kernel.asm` 找到 `test_backtrace ` 函数的地址，并在该地址打断点，观察每次调用前后发生了什么？每次的递归调用会有多少个32bit的双字入栈，它们分别是什么？
+
 
 
 使用以下命令查看调用栈的信息
@@ -746,6 +750,9 @@ mov    %esp,%ebp
 - `frame n` ：切换栈帧
 - `info f n` : 查看栈帧信息
 
+
+esp变化：0xf0117fe0 0xf0117fc0  0xf0117fa0 0xf0117f80 ....  
+每次调用栈指针变化0x20，即8个32bit的双字入栈
 
 
 经过上面的练习的练习已经能够实现一个stack backtrace(`mon_backtrace()`)，该函数在`kern/monitor.c`文件中。这个函数应该按以下格式显示函数调用栈：
@@ -757,7 +764,40 @@ Stack backtrace:
 ```
 
 `ebp` 是基址指针，`eip` 表示的是函数调用指令的下一条指令的地址， `args` 是函数调用的前5个参数。`mon_backtrace ` 打印的顺序是第一行当前指向的函数，第二行是上一个调用的函数，...., 需要打印所有的调用栈，通过`kern/entry.S` 中的代码可以知道什么时候停止。
+需要注意的点就是，我们前面知道ebp初始化为0，因此终止的条件就是0。
 
+通过观察栈空间分布，ebp+1存放的是函数返回地址，从ebp+2开始才是参数。
+
+由于这个函数调用参数是相对固定的，因此我们输出5个参数。
+
+实现的代码：
+```c++
+// 添加命令
+static struct Command commands[] = {
+	{ "help", "Display this list of commands", mon_help },
+	{ "kerninfo", "Display information about the kernel", mon_kerninfo },
+	{ "traceback",  "traceback info", mon_backtrace},
+};
+
+
+int
+mon_backtrace(int argc, char **argv, struct Trapframe *tf)
+{
+	// Your code here.
+	cprintf("Stack backtrace:\n");
+	struct Eipdebuginfo info;
+	uint32_t ebp, eip;
+	for (ebp = read_ebp(); ebp != 0; ebp = *((uint32_t*) ebp)) {
+		eip = *((uint32_t *)ebp + 1);
+		debuginfo_eip(eip, &info);
+		cprintf("  ebp %08x  eip %08x  args %08x %08x %08x %08x %08x\n",
+				ebp, eip, *((uint32_t*)ebp+2), *((uint32_t*)ebp+3),
+				*((uint32_t*)ebp+4), *((uint32_t*)ebp+5), *((uint32_t*)ebp+6));
+	}
+
+	return 0;
+}
+```
 
 **Exercise 11:**
 > 实现上面所述的函数。完成之后可以使用 `make grade` 命令检查是否正确。
@@ -788,4 +828,36 @@ Stack backtrace:
   ebp f010fff8  eip f010003d  args 00000000 00000000 0000ffff 10cf9a00 0000ffff
          kern/entry.S:70: <unknown>+0
 K>
+```
+
+<!-- TODO 使用 objdump工具分析elf文件的符号表 -->
+
+实现
+```c++
+// kdebug.c
+	// Your code here.
+	stab_binsearch(stabs, &lline, &rline, N_SLINE, addr);
+  info->eip_line = lline > rline ? -1 : stabs[rline].n_desc;
+
+// monitor.c
+int
+mon_backtrace(int argc, char **argv, struct Trapframe *tf)
+{
+	// Your code here.
+	cprintf("Stack backtrace:\n");
+	struct Eipdebuginfo info;
+	uint32_t ebp, eip;
+	for (ebp = read_ebp(); ebp != 0; ebp = *((uint32_t*) ebp)) {
+		eip = *((uint32_t *)ebp + 1);
+		debuginfo_eip(eip, &info);
+		cprintf("  ebp %08x  eip %08x  args %08x %08x %08x %08x %08x\n",
+				ebp, eip, *((uint32_t*)ebp+2), *((uint32_t*)ebp+3),
+				*((uint32_t*)ebp+4), *((uint32_t*)ebp+5), *((uint32_t*)ebp+6));
+    // 输出符号信息
+		cprintf("         %s:%d: %.*s+%d\n", info.eip_file, info.eip_line, 
+					info.eip_fn_namelen, info.eip_fn_name, eip-info.eip_fn_addr);
+	}
+
+	return 0;
+}
 ```
