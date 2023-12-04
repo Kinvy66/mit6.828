@@ -14,9 +14,9 @@ size_t npages;			// Amount of physical memory (in pages) 物理内存总页数
 static size_t npages_basemem;	// Amount of base memory (in pages)， 基地址所在的页
 
 // These variables are set in mem_init()
-pde_t *kern_pgdir;		// Kernel's initial page directory
-struct PageInfo *pages;		// Physical page state array
-static struct PageInfo *page_free_list;	// Free list of physical pages
+pde_t *kern_pgdir;		// Kernel's initial page directory  内核初始化页目录
+struct PageInfo *pages;		// Physical page state array  物理内存状态数组
+static struct PageInfo *page_free_list;	// Free list of physical pages  空闲物理页
 
 
 // --------------------------------------------------------------
@@ -29,6 +29,11 @@ nvram_read(int r)
 	return mc146818_read(r) | (mc146818_read(r + 1) << 8);
 }
 
+/**
+ * @brief 物理内存检测
+ * @details 通过IO指令读取CMOS中存储的物理内存的信息, 
+ * 设置npages 和 npages_basemem 全局变量的值
+ */
 static void
 i386_detect_memory(void)
 {

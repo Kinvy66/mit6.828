@@ -34,7 +34,9 @@ i386_init(void)
 	// cprintf("x=%d y=%d", 3);
 
 	// Test the stack backtrace function (lab 1 only)
-	test_backtrace(5);
+	// test_backtrace(5);
+
+	mem_init();
 
 	// Drop into the kernel monitor.
 	while (1)
