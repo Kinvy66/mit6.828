@@ -11,7 +11,7 @@
 
 // These variables are set by i386_detect_memory()
 size_t npages;			// Amount of physical memory (in pages) 物理内存总页数
-static size_t npages_basemem;	// Amount of base memory (in pages)， 基地址所在的页
+static size_t npages_basemem;	// Amount of base memory (in pages)， 基地址的页数
 
 // These variables are set in mem_init()
 pde_t *kern_pgdir;		// Kernel's initial page directory  内核初始化页目录
@@ -33,6 +33,8 @@ nvram_read(int r)
  * @brief 物理内存检测
  * @details 通过IO指令读取CMOS中存储的物理内存的信息, 
  * 设置npages 和 npages_basemem 全局变量的值
+ * TODO 读取CMOS中物理内存的大小不靠谱，参考 https://wiki.osdev.org/Detecting_Memory_(x86)
+ * 修改物理内存的获取方式
  */
 static void
 i386_detect_memory(void)
@@ -42,11 +44,12 @@ i386_detect_memory(void)
 	// Use CMOS calls to measure available base & extended memory.
 	// (CMOS calls return results in kilobytes.)
 	basemem = nvram_read(NVRAM_BASELO);  // 640KB
-	extmem = nvram_read(NVRAM_EXTLO);
-	ext16mem = nvram_read(NVRAM_EXT16LO) * 64;
+	extmem = nvram_read(NVRAM_EXTLO);    // 1MB ~ 16MB
+	ext16mem = nvram_read(NVRAM_EXT16LO) * 64;  // 16MB ~ 4GB  这里 *64？
 
 	// Calculate the number of physical pages available in both base
 	// and extended memory.
+	// 计算基本内存和扩展内存
 	if (ext16mem)
 		totalmem = 16 * 1024 + ext16mem;
 	else if (extmem)
@@ -54,11 +57,13 @@ i386_detect_memory(void)
 	else
 		totalmem = basemem;
 
-	npages = totalmem / (PGSIZE / 1024);
-	npages_basemem = basemem / (PGSIZE / 1024);  // 640K/4K
+	npages = totalmem / (PGSIZE / 1024);  // 总字节（KB） / 页（KB)  所有内存的页数
+	npages_basemem = basemem / (PGSIZE / 1024);  // 640K/4K 基址的页数             
 
 	cprintf("Physical memory: %uK available, base = %uK, extended = %uK\n",
 		totalmem, basemem, totalmem - basemem);
+	// Physical memory: 131072K available, base = 640K, extended = 130432K
+	// 总共128MB内存
 }
 
 
@@ -97,9 +102,11 @@ boot_alloc(uint32_t n)
 	// which points to the end of the kernel's bss segment:
 	// the first virtual address that the linker did *not* assign
 	// to any kernel code or global variables.
+	// end 是链接脚本中的一个变量，表示的是内核最后的内存的地址（虚拟地址）
+	// 内核的起始虚拟地址KERNBASE：0xf0000000
 	if (!nextfree) {
 		extern char end[];
-		nextfree = ROUNDUP((char *) end, PGSIZE);
+		nextfree = ROUNDUP((char *) end, PGSIZE);  // 获取内核存放地址下一个4KB（PGSIZE）对齐的内存地址
 	}
 
 	// Allocate a chunk large enough to hold 'n' bytes, then update
@@ -108,10 +115,10 @@ boot_alloc(uint32_t n)
 	//
 	// LAB 2: Your code here.
 	result = nextfree;
-	nextfree = ROUNDUP(nextfree + n, PGSIZE);
 	if ((uint32_t)nextfree-KERNBASE > (npages*PGSIZE)) {
 		panic("OUT OF MEMORY");
 	}
+	nextfree = ROUNDUP(nextfree + n, PGSIZE);  // 更新下一个空闲页的地址
 
 	return result;
 }
@@ -138,8 +145,8 @@ mem_init(void)
 	// panic("mem_init: This function is not finished\n");
 
 	//////////////////////////////////////////////////////////////////////
-	// create initial page directory.
-	kern_pgdir = (pde_t *) boot_alloc(PGSIZE);
+	// create initial page directory. 页目录表紧跟内核之后4KB对齐的位置
+	kern_pgdir = (pde_t *) boot_alloc(PGSIZE);      
 	memset(kern_pgdir, 0, PGSIZE);
 
 	//////////////////////////////////////////////////////////////////////
@@ -245,7 +252,7 @@ mem_init(void)
 // After this is done, NEVER use boot_alloc again.  ONLY use the page
 // allocator functions below to allocate and deallocate physical
 // memory via the page_free_list.
-//
+// TODO 将page_free_list的顺序改成和pages数组的顺序一致 
 void
 page_init(void)
 {
@@ -254,45 +261,52 @@ page_init(void)
 	//  1) Mark physical page 0 as in use.
 	//     This way we preserve the real-mode IDT and BIOS structures
 	//     in case we ever need them.  (Currently we don't, but...)
+	//     页0， 存放IDT
 	//  2) The rest of base memory, [PGSIZE, npages_basemem * PGSIZE)
-	//     is free.
+	//     is free. 
+	//	   基址（640KB)剩下的内存
 	//  3) Then comes the IO hole [IOPHYSMEM, EXTPHYSMEM), which must
-	//     never be allocated.
-	//  4) Then extended memory [EXTPHYSMEM, ...).
+	//     never be allocated. 
+	// 	   IO hole 的内存不能使用
+	//  4) Then extended memory [EXTPHYSMEM, ...).  所有剩下的物理内存
 	//     Some of it is in use, some is free. Where is the kernel
 	//     in physical memory?  Which pages are already in use for
 	//     page tables and other data structures?
+	//     所有剩下的物理内存，这些并不都是空闲内存，部分内页是有数据的，比如内核。
 	//
 	// Change the code to reflect this.
 	// NB: DO NOT actually touch the physical memory corresponding to
 	// free pages!
 	size_t i;
 
-	// boot_alloc(0) 获取之前分配到空闲页的首地址, 
-	// npages_basemem = 640K / 4k
-	// (1MB - 640KB)/4KB = 96
+	// page_in_use_end 没有使用的内存地址的开始位置（页），即使用了的结束位置
+	// npages_basemem = 640K / 4k , 640KB 的基址的物理页
+	// (1MB - 640KB)/4KB = 96  ， IO hole的物理页
+	// ((uint32_t)boot_alloc(0) - KERNBASE) /PGSIZE  内核使用的物理页, 
 	const size_t page_in_use_end = 
 			npages_basemem + 96 + ((uint32_t)boot_alloc(0) - KERNBASE) / PGSIZE;
 
-	// page_in_use_end = 600
+	// page_in_use_end = 600， 已经使用了物理页
 	cprintf("now in used: %d\n", page_in_use_end);
 
 	// 设置page0为使用
 	cprintf("%08x %08x\n", pages, (uint32_t)boot_alloc(0));
 
-	// page0 存放IDT，
+	// 1. 0-4KB, page0 存放IDT，
 	pages[0].pp_ref = 1;
 
+	// 2. 4-640KB
 	for (i = 1; i < npages_basemem; i++) {
 		pages[i].pp_ref = 0;
 		pages[i].pp_link = page_free_list;
 		page_free_list = &pages[i];
 	}
-	// I/O
+	// 3. 640 - used,  I/O hole 和 内核代码
 	for(i = npages_basemem; i < page_in_use_end; ++i) {
 		pages[i].pp_ref = 1;
 	}
 
+	// 4. kernel_end~... ，内核代码后面的都是空闲内存
 	for (i = page_in_use_end; i < npages; i++) {
 		pages[i].pp_ref = 0;
 		pages[i].pp_link = page_free_list;
@@ -340,6 +354,11 @@ page_free(struct PageInfo *pp)
 	// Fill this function in
 	// Hint: You may want to panic if pp->pp_ref is nonzero or
 	// pp->pp_link is not NULL.
+	if (pp->pp_ref != 0 || pp->pp_link != NULL) {
+		panic("can't properly free page\n");
+	}
+	pp->pp_link = page_free_list;
+	page_free_list = pp;
 }
 
 //
