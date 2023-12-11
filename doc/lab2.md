@@ -233,5 +233,235 @@ page_free(struct PageInfo *pp)
 }
 ```
 
+## Part2: Virtual Memory
+在完成下面的任务前。请先确保你熟悉X86的保护模式以及内存管理：分段和分页。
+
+#### Exercise2:
+> 查看 [Intel 80386 Reference Manual](https://pdos.csail.mit.edu/6.828/2018/readings/i386/toc.htm) 的第5和6章，阅读关于页转换和基于页的保护(5.2~6.4)。分段机制相关的章节也最好阅读一下。
+
+
+### Virtual, Linear, and Physical Addresses
+X86 的分段和分页的内存管理机制比较复杂，在另一个文档 [分页机制](./分页机制.md) 有简要的介绍。
+
+
+在lab1的part3，我简单的设置了页表并且将前4MB的内存地址映射到 0xf0000000 起始的虚拟地址，内核运行的地址在 0xf0100000。在本实验我们将映射前256MB内存到虚拟地址，0xf0000000.
+
+#### Exercise3:
+> 在QEMU的终端 `Ctrl-a c` 进入调试模式，使用 `xp` 命令（查看物理地址），在GDB中使用`x` 命令（查看线性地址），观察得到的是不是一样的数据
+> 使用课程修改过的QEMU，有提供 `info pg` 命令，可以查看页表信息。当然官方的QEMU也有这样的命令，是 `info mem`。
+
+
+`info pg` 查看的页表信息如下图所示：
+![](./images/lab2-e3-1.png)
+
+`info mem` 查看的内存映射信息：
+![](./images/lab2-e3-2.png)
+
+这个与代码中的一致，我们只设置了页目录表的第0和960(0x3c0) 项。`entrypadir.c` 
+```c++
+__attribute__((__aligned__(PGSIZE)))
+pde_t entry_pgdir[NPDENTRIES] = {
+	// Map VA's [0, 4MB) to PA's [0, 4MB)
+	[0]
+		= ((uintptr_t)entry_pgtable - KERNBASE) + PTE_P,
+	// Map VA's [KERNBASE, KERNBASE+4MB) to PA's [0, 4MB)
+	[KERNBASE>>PDXSHIFT]
+		= ((uintptr_t)entry_pgtable - KERNBASE) + PTE_P + PTE_W
+};
+```
+页目录表和页表的表项都是4个字节，其结构如下：
+![](./images/lab2-e3-3.png)
+
+页目录和页表都是4KB对齐的，所以只要20位就可以索引到一个物理页，剩下的12位作为标志，表示对应的页属性。
+```c++
+// Page table/directory entry flags.
+#define PTE_P		0x001	// Present 是否存在
+#define PTE_W		0x002	// Writeable 读/写
+#define PTE_U		0x004	// User 用户/超级用户
+#define PTE_PWT		0x008	// Write-Through  
+#define PTE_PCD		0x010	// Cache-Disable
+#define PTE_A		0x020	// Accessed 已访问
+#define PTE_D		0x040	// Dirty 已修改
+#define PTE_PS		0x080	// Page Size
+#define PTE_G		0x100	// Global
+```
+
+在QEMU中查看物理地址 0x0和在gdb中查看虚拟地址0xf0000000的数据，可以观察到它们是一样的：
+![](./images/lab2-e3-4.png)  
+
+
+
+在进入保护模式之后，我们就不能之间操作线性地址或物理地址。所有的内存地址都会被认为是虚拟地址，然后又MMU转换成物理地址，这意味着在C语言中的指针变量的值都是虚拟地址。  
+JOS内核经常需要把地址作为一个数值来操作，而不是对地址进行解引用。在JOS的代码中使用 `uintptr_t` 表示虚拟地址的数值，使用 `physaddr_t` 物理地址的值，这两个类型其实都是 `uint32` 。在内核代码的地址操作，实际是操作的 `uint32_t` 数值，所以不能对地址解引用，否则编译器会报错。  
+JOS内核可是先把 `uintptr_t` 转换成指针类型，然后再解引用。但是对于 `physaddr_t` 不能这样操作，因为即使转换成了指针类型，它也只是虚拟地址，并不是真实的物理地址。  
+总的来说，这几个类型的对应关系如下：
+```
+C Type    	Address type
+T*		  	Virtual
+uintptr_t	Virtual
+physaddr_t	Physical
+```
+
+#### Question
+> 假设下面的内核代码是正确的，则x的类型是什么， `uintptr_t` 还是 `physaddr_t`
+> ```c++
+> mystery_t x;
+> char* value = return_a_pointer();
+> *value = 10;
+> x = (mystery_t) value;
+> ```
+
+`x` 的值是一个虚拟地址。  
+
+
+
+在内核中我们经常需要读写物理地址或虚拟地址，JOS提供了两个宏实现物理地址和虚拟地址的转换，分别是 `KADDR(pa)`(物理地址转换成虚拟地址)， `PADDR(kva)` 虚拟地址转换成物理地址。对应的还有两个函数（函数内部就是调用了这两个宏）`pa2page(physaddr_t pa)` 和 `page2kva(struct PageInfo *pp)`
+
+### Reference counting
+在后面的实验中，你经常需要把某个物理内存映射到多个不同的虚拟地址，为此我们需要一个变量保存引用计数, `PageInfo` 的 `pp_ref` 变量就是保存引用计数的。
+```c++
+// PageInfo 记录的不是物理地址本身
+struct PageInfo {
+	// Next page on the free list.
+	// 下一个空闲的物理页地址
+	struct PageInfo *pp_link;
+
+	// pp_ref is the count of pointers (usually in page table entries)
+	// to this page, for pages allocated using page_alloc.
+	// Pages allocated at boot time using pmap.c's
+	// boot_alloc do not have valid reference count fields.
+	// 引用计数, 记录有多少个虚拟地址映射到该物理地址
+	uint16_t pp_ref;
+};
+```
+当一个地址的引用变成0，就可以释放该内存。使用 `page_alloc` 分配的内存返回的 `PageInfo` 引用计数是0， 所以在操作之前需要对引用计数自增。
+
+
+### Page Table Management
+完成下面关于页管理的函数：
+
+#### Exercise4
+> 在 `kern/pmap.c` 实现下面函数：
+> `pgdir_walk()`
+> `boot_map_region()`
+> `page_lookup()`
+> `page_remove()`
+> `page_insert()`
+> 在 `mem_init()` 中调用 `check_page()` 测试上面函数是否成功实现。
+
+
+`pte_t* pgdir_walk(pde_t *pgdir, const void *va, int create)` : 给一个页目录的指针 pgdir, 返回 `va` 指向的页表项地址。若此 pte 没有被初始化，则通过 `create` 参数判断是否新建页，并返回 pte.
+```c++
+pte_t *
+pgdir_walk(pde_t *pgdir, const void *va, int create)
+{
+	// Fill this function in
+	pde_t* pgdir_entry = pgdir + PDX(va); // 页目录首地址+页目录项的索引（va的高10bit)
+	if (!(*pgdir_entry & PTE_P)) {  // 不存在
+		if (!create) {
+			return NULL;
+		} else {  // 创建
+			struct PageInfo* new_page = page_alloc(1);
+			if (!new_page) {
+				return NULL;
+			}
+			// 设置新页目录项的标志位
+			*pgdir_entry = (page2pa(new_page) | PTE_P | PTE_W | PTE_U);
+			++new_page->pp_ref;
+		}
+	}
+	return (pte_t*)(KADDR(PTE_ADDR(*pgdir_entry))) + PTX(va);
+}
+```
+
+---
+
+
+`static void boot_map_region(kern_pgdir, uintptr_t va, size_t size, physaddr_t pa, int perm)`： 通过地址区间，将虚拟地址和物理地址进行映射。 将 [va, va+size) 的虚拟地址空间映射到 [pa, pa+size)的物理空间：
+
+```c++
+static void
+boot_map_region(pde_t *pgdir, uintptr_t va, size_t size, physaddr_t pa, int perm)
+{
+	// Fill this function in
+	int offset;
+	pte_t* pgtable_entry;
+	for (offset = 0; offset < size; 
+	offset +=PGSIZE, va += PGSIZE, pa += PGSIZE) {
+		pgtable_entry = pgdir_walk(pgdir, (void*) va, 1);
+		*pgtable_entry = (pa | perm | PTE_P);
+	}
+}
+```
+
+---
+
+`page_insert(pde_t *pgdir, struct PageInfo *pp, void *va, int perm)`:
+若该虚拟地址之前已经建立映射了，那么取消原来的映射关系（即将原来的pg table entry内容移除），并且将新的映射关系记录下来。
+```c++
+int
+page_insert(pde_t *pgdir, struct PageInfo *pp, void *va, int perm)
+{
+	// Fill this function in
+	pte_t* pgtable_entry = pgdir_walk(pgdir, va, 1);
+	if (!pgtable_entry) {
+		return -E_NO_MEM;
+	}
+	++pp->pp_ref;
+	if ((*pgtable_entry) & PTE_P) {
+		tlb_invalidate(pgdir, va);
+		page_remove(pgdir, va);
+	}
+	*pgtable_entry = (page2pa(pp) | perm | PTE_P);
+	*(pgdir + PDX(va)) |= perm;
+	return 0;
+}
+```
+
+---
+
+
+`struct PageInfo *page_lookup(pde_t *pgdir, void *va, pte_t **pte_store)`, 找到虚拟地址对应的页地址。
+
+```c++
+struct PageInfo *
+page_lookup(pde_t *pgdir, void *va, pte_t **pte_store)
+{
+	// Fill this function in
+	pte_t* pgtable_entry = pgdir_walk(pgdir, va, 0);
+	if (!pgtable_entry || !(*pgtable_entry & PTE_P)) {
+		return NULL;
+	}
+	if (pte_store) {
+		*pte_store = pgtable_entry;
+	}
+	return pa2page(PTE_ADDR(*pgtable_entry));
+}
+```
+
+---
+`page_remove()`: 将虚拟地址建立的映射关系取消。
+
+```c++
+void
+page_remove(pde_t *pgdir, void *va)
+{
+	// Fill this function in
+	pte_t *pgtable_entry;
+	struct PageInfo* page = page_lookup(pgdir, va, &pgtable_entry);
+	if (!page) {
+		return;
+	}
+	page_decref(page);
+	tlb_invalidate(pgdir, va);
+	*pgtable_entry = 0;
+}
+```
+
+
+
+
+
+
 
 

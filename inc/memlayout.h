@@ -171,6 +171,7 @@ extern volatile pde_t uvpd[];     // VA of current page directory
  * correspondence between physical pages and struct PageInfo's.
  * You can map a struct PageInfo * to the corresponding physical address
  * with page2pa() in kern/pmap.h.
+ * PageInfo 记录的不是物理地址本身， 使用 page2pa() 可以获取到相关的物理地址
  */
 struct PageInfo {
 	// Next page on the free list.
@@ -181,7 +182,7 @@ struct PageInfo {
 	// to this page, for pages allocated using page_alloc.
 	// Pages allocated at boot time using pmap.c's
 	// boot_alloc do not have valid reference count fields.
-	// 记录当前有有多少个指针指向该物理内存，类似引用计数
+	// 引用计数, 记录有多少个虚拟地址映射到该物理地址
 	uint16_t pp_ref;
 };
 
